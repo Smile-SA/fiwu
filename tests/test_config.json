@@ -1,0 +1,10 @@
+{
+    "default": "block",
+    "ping":    { "global": "allowed" },
+    "dig":     { "global": "allowed" },
+    "curl":    { "global": "blocked" },
+    "openssl": { "global": "blocked" },
+    "nc":      { "global": "allowed" },
+    "nmap":    { "global": "blocked" },
+    "nping":   { "global": "blocked" }
+}

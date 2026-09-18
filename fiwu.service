@@ -1,0 +1,22 @@
+# ==============================================================================
+# Fiwu Firewall Systemd Unit File
+# Defines how the Fiwu firewall daemon is managed by systemd on Linux.
+# Ensures automatic startup, graceful restarts on failure, and correct
+# network dependency ordering.
+# ==============================================================================
+
+# Ensure network interfaces are up before starting Fiwu.
+[Unit]
+Description=Per-process egress firewall for Linux with UI prompts
+After=network.target
+
+# Launch the Fiwu daemon via its module entry point.
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 -m fiwu.fiwu
+
+# Automatically restart the service if it crashes or exits unexpectedly.
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target

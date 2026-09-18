@@ -1,0 +1,91 @@
+#include <tunables/global>
+
+profile fiwu flags=(attach_disconnected) {
+  #include <abstractions/base>
+  #include <abstractions/python>
+  #include <abstractions/nameservice>
+
+  # Root & Directory Traversal
+  / r,
+
+  # Process Control & D-Bus
+  dbus,
+  signal,
+  ptrace,
+
+  # Network Sockets
+  network raw,
+  network packet,
+  network inet stream,
+  network inet dgram,
+  network inet6 stream,
+  network inet6 dgram,
+  network unix stream,
+  network unix dgram,
+  network netlink raw,
+
+  # Executables & Python Environment
+  /usr/bin/python3* ix,
+  /usr/lib/python3** r,
+  /usr/local/lib/python3** r,
+
+  # Fiwu System Paths & Logging
+  /etc/fiwu/ r,
+  /etc/fiwu/** rw,
+  /var/backups/fiwu/ r,
+  /var/backups/fiwu/** rw,
+  /var/log/fiwu.log* rw,
+  /var/log/fiwu/** rw,
+
+  # Subprocesses & System Utilities
+  /bin/bash Ux,
+  /usr/bin/env ix,
+  /usr/bin/sudo Ux,
+  /{,usr/}{bin,sbin}/iptables* ix,
+  /{,usr/}{bin,sbin}/ip6tables* ix,
+  /{,usr/}{bin,sbin}/xtables* ix,
+  /{,usr/}{bin,sbin}/ss ix,
+  /{,usr/}{bin,sbin}/zenity Ux,
+  /{,usr/}{bin,sbin}/runuser Ux,
+  /{,usr/}{bin,sbin}/systemd-run Ux,
+
+  # Packaging, Scapy & System Inspection Requirements
+  /etc/default/apport r,
+  /etc/apt/apt.conf.d/ r,
+  /etc/apt/apt.conf.d/** r,
+  /usr/share/dpkg/ r,
+  /usr/share/dpkg/** r,
+  /root/.cache/scapy/** rw,
+  @{HOME}/.cache/scapy/** rw,
+
+  # Hardware, Display, IPC & Runtime Paths
+  /proc/ r,
+  /proc/** r,
+  /sys/** r,
+  /dev/null rw,
+  /dev/tty rw,
+  /dev/shm/** rwm,
+  /tmp/** rw,
+  /run/user/** rw,
+  /dev/dri/** rw,
+  /usr/share/glvnd/** r,
+  /etc/glvnd/** r,
+  /home/*/.Xauthority r,
+  /root/.Xauthority r,
+
+  # Linux Capabilities
+  capability net_admin,
+  capability net_raw,
+  capability dac_read_search,
+  capability sys_ptrace,
+  capability sys_admin,
+  capability setuid,
+  capability setgid,
+  capability sys_resource,
+  capability audit_write,
+
+  # Explicit Security Deny Rules
+  deny /etc/passwd w,
+  deny /root/.ssh/** rw,
+  deny /home/**/.ssh/** rw,
+}

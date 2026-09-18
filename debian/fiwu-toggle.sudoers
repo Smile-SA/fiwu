@@ -1,0 +1,1 @@
+ALL ALL=(ALL) NOPASSWD: /usr/bin/systemctl start fiwu.service, /usr/bin/systemctl stop fiwu.service, /usr/bin/systemctl enable fiwu.service, /usr/bin/systemctl disable fiwu.service, /usr/bin/cat /etc/fiwu/config.json, /usr/bin/tee /etc/fiwu/config.json
