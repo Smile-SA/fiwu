@@ -1,0 +1,6 @@
+{
+  "name": "Fiwu Toggle",
+  "description": "Toggles a systemd service",
+  "uuid": "fiwu-toggle@rnd.smile.fr",
+  "shell-version": ["45", "46", "47", "49", "50", "51", "52", "53"]
+}

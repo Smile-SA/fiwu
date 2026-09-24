@@ -1,0 +1,4 @@
+{
+    "gui": "tkinter",
+    "default": "block"
+}

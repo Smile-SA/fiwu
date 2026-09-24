@@ -1,0 +1,357 @@
+stages:
+  # Jobs in later stages wait for the preceding stage unless an explicit 
+  # needs relationship applies.
+  - build
+  - test-service-management
+  - test-configuration
+  - import-github-pr
+  - deploy
+
+variables:
+  # Set to "fedora", "debian", or "ubuntu" for a single-platform pipeline;
+  # "all" enables every platform job.
+  RUN_PLATFORM: "all"
+  DEBIAN_FRONTEND: "noninteractive"
+  NEEDRESTART_MODE: "a"
+  IS_UBUNTU: "false"
+  DEB_BUILD_OPTIONS: "parallel=3"
+  MAKEFLAGS: "-j3"
+  RPM_BUILD_NCPUS: "3"
+  KEEP_BUILD_ARTIFACTS: "1"
+
+default:
+  # Retry infrastructure failures
+  retry:
+    max: 2
+    when:
+      - runner_system_failure
+      - stuck_or_timeout_failure
+
+.fedora_job:
+  # Hidden templates apply platform selection without duplicating rules in
+  # every Fedora job. The final rule prevents accidental inclusion otherwise.
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "trigger"'
+      when: never
+    - if: '$CI_COMMIT_BRANCH =~ /^gh-pr-/'
+      when: manual
+    - if: '$RUN_PLATFORM == "all" || $RUN_PLATFORM == "fedora"'
+    - when: never
+
+.ubuntu_job:
+  # Ubuntu jobs run only in Ubuntu or full pipeline mode.
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "trigger"'
+      when: never
+    - if: '$CI_COMMIT_BRANCH =~ /^gh-pr-/'
+      when: manual
+    - if: '$RUN_PLATFORM == "all" || $RUN_PLATFORM == "ubuntu"'
+    - when: never
+
+.debian_job:
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "trigger"'
+      when: never
+    - if: '$CI_COMMIT_BRANCH =~ /^gh-pr-/'
+      when: manual
+    - if: '$RUN_PLATFORM == "all" || $RUN_PLATFORM == "debian"'
+    - when: never
+    
+.tests_dependencies:
+  # YAML anchor shared by protocol tests. It installs only the tools needed by
+  # the network probes and handles both Debian and Fedora Distros.
+  install_test_dependencies: &install_test_dependencies
+  - |
+    # Ubuntu / Debian
+    if command -v apt-get >/dev/null 2>&1; then
+      sleep $((RANDOM % 5 + 1))
+      
+      # Configure APT timeouts inline so network stalls fail in seconds instead of minutes
+      APT_OPTS="-o Acquire::http::Timeout=10 -o Acquire::https::Timeout=10 -o Acquire::Retries=1 -o Acquire::http::Pipeline-Depth=0"
+      
+      retry=0
+      until [ "$retry" -ge 3 ]; do
+        apt-get update -qq $APT_OPTS >/dev/null 2>&1 && break
+        retry=$((retry+1))
+        sleep $(( (2 ** retry) + (RANDOM % 3) ))
+      done
+      
+      apt-get install -y -qq $APT_OPTS --no-install-recommends \
+              jq nmap dnsutils netcat-openbsd iputils-ping openssl curl sudo >/dev/null 2>&1 || \
+      { sleep 2 && apt-get install -y -qq $APT_OPTS --no-install-recommends jq nmap dnsutils netcat-openbsd iputils-ping openssl curl sudo >/dev/null 2>&1; }
+
+    # Fedora
+    elif command -v dnf >/dev/null 2>&1; then
+      dnf install -y -q jq nmap bind-utils netcat iputils openssl curl sudo
+    fi
+
+.start_fiwu:
+  start: &start_fiwu
+  - |
+    command -v pgrep >/dev/null 2>&1 || { apt-get install -y -qq procps || dnf install -y -q procps-ng; }
+    UNIT=$(ls /usr/lib/systemd/system/fiwu.service /lib/systemd/system/fiwu.service 2>/dev/null | head -1)
+    [ -n "$UNIT" ] || { echo "fiwu.service unit not found in package" >&2; exit 1; }
+    EXEC=$(grep -m1 '^ExecStart=' "$UNIT" | sed -E 's/^ExecStart=[-@+!:]*//')
+    echo "Starting daemon: $EXEC"
+    nohup sh -c "exec $EXEC" >/tmp/fiwu.log 2>&1 &
+    FIWU_PID=$!
+    sleep 3
+    echo "--- fiwu log (tail) ---"; tail -n 20 /tmp/fiwu.log
+    BIN=$(basename "${EXEC%% *}")
+    kill -0 "$FIWU_PID" 2>/dev/null || pgrep -x "$BIN" >/dev/null || { echo "fiwu daemon is not running" >&2; exit 1; }
+
+# Build one package per OS_TAG. Build jobs publish only the package format that
+# their downstream tests install; dist/ itself remains an ephemeral workspace.
+# Build baseline packages (forward-compatible across target OS releases)
+debian:
+  extends: .debian_job
+  stage: build
+  image: debian:12
+  tags:
+    - gitlab-org-docker
+  before_script:
+    - mkdir -p dist
+  script:
+    - ./install.sh --build-local
+  artifacts:
+    paths:
+      - dist/*.deb
+    expire_in: 1 day
+  parallel:
+    matrix:
+      - OS_TAG: debian12
+
+fedora:
+  extends: .fedora_job
+  stage: build
+  image: fedora:43
+  tags:
+    - gitlab-org-docker
+  before_script:
+    - mkdir -p dist
+  script:
+    - ./install.sh --build-local
+  artifacts:
+    paths:
+      - dist/*.rpm
+    expire_in: 1 day
+  parallel:
+    matrix:
+      - OS_TAG: fedora43
+
+# Test Extension verify installation of gnome extension, contents and permissions independently of
+# the runtime protocol tests, while still using the matching platform build.
+ubuntu:gnome_extension:
+  extends: .ubuntu_job
+  stage: test-service-management
+  image: $OS_TAG
+  tags:
+    - gitlab-org-docker
+  needs:
+    - job: debian
+      artifacts: true
+  before_script:
+    - test -n "$(ls dist/*.deb 2>/dev/null)" || (echo "Missing .deb package in dist/" >&2; exit 1)
+    - apt-get update -qq && apt-get install -y ./dist/fiwu_*.deb
+    - chmod +x ./tests/test_extension.sh
+  script:
+    - ./tests/test_extension.sh
+  parallel:
+    matrix:
+      - OS_TAG: ["ubuntu:22.04", "ubuntu:24.04", "ubuntu:26.04"]
+
+debian:gnome_extension:
+  extends: .debian_job
+  stage: test-service-management
+  image: $OS_TAG
+  tags:
+    - gitlab-org-docker
+  needs:
+    - job: debian
+      artifacts: true
+  before_script:
+    - test -n "$(ls dist/*.deb 2>/dev/null)" || (echo "Missing .deb package in dist/" >&2; exit 1)
+    - apt-get update -qq && apt-get install -y ./dist/fiwu_*.deb
+    - chmod +x ./tests/test_extension.sh
+  script:
+    - ./tests/test_extension.sh
+  parallel:
+    matrix:
+      - OS_TAG: ["debian:12", "debian:13"]
+
+fedora:gnome_extension:
+  extends: .fedora_job
+  stage: test-service-management
+  image: $OS_TAG
+  tags:
+    - gitlab-org-docker
+  needs:
+    - job: fedora
+      artifacts: true
+  before_script:
+    - test -n "$(ls dist/*.rpm 2>/dev/null)" || (echo "Missing .rpm for ${OS_TAG}" >&2; exit 1)
+    - dnf install -y ./dist/*.rpm
+    - chmod +x ./tests/test_extension.sh
+  script:
+    - ./tests/test_extension.sh
+  parallel:
+    matrix:
+      - OS_TAG: ["fedora:43"]
+
+# Configuration
+ubuntu:configuration:
+  extends: .ubuntu_job
+  stage: test-configuration
+  image: $OS_TAG
+  tags:
+    - gitlab-org-docker
+  allow_failure: false
+  needs:
+    - job: debian
+      artifacts: true
+  before_script:
+    - test -n "$(ls dist/*.deb 2>/dev/null)" || (echo "Missing .deb package in dist/" >&2; exit 1)
+    - apt-get update -qq && apt-get install -y ./dist/fiwu_*.deb
+    - *install_test_dependencies
+    - chmod +x ./tests/test_configuration.sh
+    - fiwu -g dev || true
+    - *start_fiwu
+  script:
+    - ./tests/test_configuration.sh
+  after_script:
+    - sort /tmp/fiwu.log | uniq -c | sort -rn | head -15 || true
+  parallel:
+    matrix:
+      - OS_TAG: ["ubuntu:22.04", "ubuntu:24.04", "ubuntu:26.04"]
+
+debian:configuration:
+  extends: .debian_job
+  stage: test-configuration
+  image: $OS_TAG
+  tags:
+    - gitlab-org-docker
+  allow_failure: false
+  needs:
+    - job: debian
+      artifacts: true
+  before_script:
+    - test -n "$(ls dist/*.deb 2>/dev/null)" || (echo "Missing .deb package in dist/" >&2; exit 1)
+    - apt-get update -qq && apt-get install -y ./dist/fiwu_*.deb
+    - *install_test_dependencies
+    - chmod +x ./tests/test_configuration.sh
+    - fiwu -g dev || true
+    - *start_fiwu
+  script:
+    - ./tests/test_configuration.sh 
+  after_script:
+    - sort /tmp/fiwu.log | uniq -c | sort -rn | head -15 || true
+  parallel:
+    matrix:
+      - OS_TAG: ["debian:12", "debian:13"]
+
+fedora:configuration:
+  extends: .fedora_job
+  stage: test-configuration
+  image: $OS_TAG
+  tags:
+    - gitlab-org-docker
+  allow_failure: false
+  needs:
+    - job: fedora
+      artifacts: true
+  before_script:
+    - test -n "$(ls dist/*.rpm 2>/dev/null)" || (echo "Missing .rpm for ${OS_TAG}" >&2; exit 1)
+    - dnf install -y ./dist/*.rpm
+    - *install_test_dependencies
+    - chmod +x ./tests/test_configuration.sh
+    - fiwu -g dev || true
+    - *start_fiwu
+  script:
+    - ./tests/test_configuration.sh
+  after_script:
+    - sort /tmp/fiwu.log | uniq -c | sort -rn | head -15 || true
+  parallel:
+    matrix:
+      - OS_TAG: ["fedora:43"]
+
+# Uploads the tested .deb/.rpm to GitLab Package Registry and pushes to GitHub Releases.
+release:github:
+  stage: deploy
+  needs:
+    - job: debian
+      artifacts: true
+    - job: fedora
+      artifacts: true
+    - job: ubuntu:gnome_extension
+    - job: debian:gnome_extension
+    - job: fedora:gnome_extension
+    - job: ubuntu:configuration
+    - job: debian:configuration
+    - job: fedora:configuration
+  tags:
+    - gitlab-org-docker
+  image: debian:12
+  script:
+    - apt-get update -qq && apt-get install -y -qq curl ca-certificates
+    - PKG_VERSION=$(dpkg-deb -f "$(ls dist/fiwu_*.deb | head -1)" Version | sed 's/[^A-Za-z0-9._-]/-/g')
+    - 'echo "Package version: ${PKG_VERSION}"'
+    # Registry upload only for manual releases
+    - |
+      if [ "$CI_PIPELINE_SOURCE" != "schedule" ]; then
+        for f in dist/*.deb dist/*.rpm; do
+          [ -e "$f" ] || continue
+          name=$(basename "$f")
+          curl --silent --fail --request PUT \
+            --header "JOB-TOKEN: ${CI_JOB_TOKEN}" \
+            --upload-file "$f" \
+            "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/packages/generic/fiwu/${PKG_VERSION}/${name}"
+          echo "Published: ${name} -> generic/fiwu/${PKG_VERSION}/${name}"
+        done
+      fi
+    # Install GitHub CLI
+    - curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg | dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg
+    - echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" | tee /etc/apt/sources.list.d/github-cli.list > /dev/null
+    - apt-get update -qq && apt-get install -y -qq gh
+    - export GH_TOKEN="$GITHUB_TOKEN"
+    - |
+      if [ "$CI_PIPELINE_SOURCE" = "schedule" ]; then
+        gh release delete "v${PKG_VERSION}" --cleanup-tag --yes --repo "$GITHUB_REPO_PATH" || true
+      fi
+    - |
+      gh release create "v${PKG_VERSION}" dist/*.deb dist/*.rpm \
+        --repo "$GITHUB_REPO_PATH" --target "$CI_COMMIT_SHA" \
+        --title "Release v${PKG_VERSION}" --notes "Automated release from GitLab CI (${CI_COMMIT_SHORT_SHA})" \
+      || gh release upload "v${PKG_VERSION}" dist/*.deb dist/*.rpm --repo "$GITHUB_REPO_PATH" --clobber
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "trigger"'
+      when: never
+    - if: '$CI_PIPELINE_SOURCE == "schedule" && $CI_COMMIT_BRANCH == "dev"'
+      when: on_success
+    - if: '$CI_COMMIT_BRANCH == "dev"'
+      when: manual
+
+sync:github:prs:
+  stage: import-github-pr
+  tags:
+    - gitlab-org-docker
+  image: debian:12
+  variables:
+    GIT_DEPTH: 0
+  script:
+    - apt-get update -qq && apt-get install -y -qq git curl jq
+    - git remote set-url origin "https://gitlab-ci-token:${CI_JOB_TOKEN}@${CI_SERVER_HOST}/${CI_PROJECT_PATH}.git"
+    - |
+      curl -fsS -H "Authorization: Bearer ${GITHUB_TOKEN}" \
+        "https://api.github.com/repos/${GITHUB_REPO_PATH}/pulls?state=open&per_page=100" \
+        | jq -r '.[].number' > open_prs.txt
+    - |
+      while read -r pr_num; do
+        branch="gh-pr-${pr_num}"
+        git fetch "https://github.com/${GITHUB_REPO_PATH}.git" "+refs/pull/${pr_num}/head:refs/heads/${branch}"
+        git push -f origin "$branch" \
+          -o merge_request.create \
+          -o merge_request.target=dev \
+          -o "merge_request.title=GitHub PR #${pr_num}"
+      done < open_prs.txt
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "trigger"'
