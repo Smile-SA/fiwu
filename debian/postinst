@@ -1,0 +1,80 @@
+#!/bin/sh
+set -e
+
+case "$1" in
+    configure)
+        # Native host-side Cython compilation for Python C-API compatibility
+        PY_DIST=$(python3 -c "import site; print(site.getsitepackages()[0])" 2>/dev/null || echo "/usr/lib/python3/dist-packages")
+        BUILD_DIR=$(mktemp -d)
+
+        if [ -f /usr/share/fiwu/netfilterqueue_src/NetfilterQueue-*.tar.gz ]; then
+            tar -xzf /usr/share/fiwu/netfilterqueue_src/NetfilterQueue-*.tar.gz -C "$BUILD_DIR"
+            CD_DIR=$(find "$BUILD_DIR" -maxdepth 1 -type d -name "NetfilterQueue-*")
+            if [ -n "$CD_DIR" ] && [ -d "$CD_DIR" ]; then
+                echo "Compiling NetfilterQueue C extension natively for host Python..."
+                (
+                    cd "$CD_DIR"
+                    cython3 -3 --fast-fail netfilterqueue/_impl.pyx || true
+                    PY_INC="$(python3 -c 'import sysconfig; print(sysconfig.get_path("include"))' 2>/dev/null || true)"
+                    if [ -n "$PY_INC" ] && [ -f "netfilterqueue/_impl.c" ]; then
+                        gcc -shared -fPIC -O2 -I"$PY_INC" netfilterqueue/_impl.c -lnetfilter_queue -o _impl.so || true
+                    fi
+                    if [ -f "_impl.so" ]; then
+                        install -d "$PY_DIST/netfilterqueue"
+                        install -m 644 netfilterqueue/*.py "$PY_DIST/netfilterqueue/"
+                        install -m 644 _impl.so "$PY_DIST/netfilterqueue/_impl.so"
+                    fi
+                ) || true
+            fi
+            rm -rf "$BUILD_DIR"
+        fi
+
+        # Clean up legacy /usr/local binary if it exists from older manual installs
+        [ -f /usr/local/bin/fiwu ] && rm -f /usr/local/bin/fiwu || true
+
+        # Reload AppArmor Profile
+        if [ -f /etc/apparmor.d/fiwu ] && command -v apparmor_parser >/dev/null 2>&1; then
+            apparmor_parser -r -W /etc/apparmor.d/fiwu || true
+        fi
+
+        # Dynamic GNOME Shell Version Patching
+        SHELL_VER="$(gnome-shell --version 2>/dev/null | awk '{print $3}' | cut -d. -f1 || true)"
+        META_PATH="/usr/share/gnome-shell/extensions/fiwu-toggle@rnd.smile.fr/metadata.json"
+        if [ -n "$SHELL_VER" ] && [ -f "$META_PATH" ]; then
+            sed -i "s/\"shell-version\": \[.*\]/\"shell-version\": [\"$SHELL_VER\"]/" "$META_PATH" || true
+        fi
+
+        # Detect Active Desktop User & Enable Extension
+        DESKTOP_USER="${SUDO_USER:-$(logname 2>/dev/null || true)}"
+        if [ -z "$DESKTOP_USER" ] || [ "$DESKTOP_USER" = "root" ]; then
+            DESKTOP_USER="$(loginctl list-users --no-legend 2>/dev/null | awk '$2 != "root" {print $2; exit}')"
+        fi
+
+        if [ -n "$DESKTOP_USER" ] && [ "$DESKTOP_USER" != "root" ] \
+            && [ -d "/run/user/$(id -u "$DESKTOP_USER")" ] \
+            && command -v gnome-extensions >/dev/null 2>&1; then
+            USER_UID="$(id -u "$DESKTOP_USER")"
+            runuser -u "$DESKTOP_USER" -- env \
+                XDG_RUNTIME_DIR="/run/user/$USER_UID" \
+                DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$USER_UID/bus" \
+                gnome-extensions enable fiwu-toggle@rnd.smile.fr 2>/dev/null || true
+        fi
+
+        # Reset any rate-limit or failed locks before systemd starts/enables the service
+        if [ -d /run/systemd/system ]; then
+            systemctl daemon-reload || true
+            systemctl reset-failed fiwu || true
+        fi
+
+        # Final Messages
+        echo ""
+        echo "Fiwu has been successfully installed."
+        echo "Please run the service with 'fiwu -e' or 'fiwu' to see all options."
+        echo "Alternatively, logout and log back in to use the GNOME Shell extension."
+        echo ""        
+    ;;
+esac
+
+#DEBHELPER#
+
+exit 0
