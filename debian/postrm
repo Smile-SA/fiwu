@@ -1,0 +1,67 @@
+#!/bin/sh
+set -e
+
+case "$1" in
+    remove|disappear)
+        # Clean host-compiled NetfilterQueue extension files
+        PY_DIST=$(python3 -c "import site; print(site.getsitepackages()[0])" 2>/dev/null || true)
+        if [ -n "$PY_DIST" ] && [ -d "$PY_DIST/netfilterqueue" ]; then
+            rm -rf "$PY_DIST/netfilterqueue"
+        fi
+
+        # Remove dangling systemd symlinks and legacy binaries
+        rm -f /etc/systemd/system/multi-user.target.wants/fiwu.service
+        rm -f /etc/systemd/system/fiwu.service
+        rm -f /usr/local/bin/fiwu
+
+        # Unload AppArmor profile from kernel memory
+        if command -v apparmor_parser >/dev/null 2>&1 && [ -f /etc/apparmor.d/fiwu ]; then
+            apparmor_parser -R /etc/apparmor.d/fiwu 2>/dev/null || true
+        fi
+
+        if [ -d /run/systemd/system ]; then
+            systemctl daemon-reload 2>/dev/null || true
+        fi
+        ;;
+
+    purge)
+        # Clean host-compiled NetfilterQueue extension files
+        PY_DIST=$(python3 -c "import site; print(site.getsitepackages()[0])" 2>/dev/null || true)
+        if [ -n "$PY_DIST" ] && [ -d "$PY_DIST/netfilterqueue" ]; then
+            rm -rf "$PY_DIST/netfilterqueue"
+        fi
+
+        # Remove remaining overrides and leftover wrappers
+        rm -f /etc/systemd/system/multi-user.target.wants/fiwu.service
+        rm -f /etc/systemd/system/fiwu.service
+        rm -f /usr/local/bin/fiwu
+
+        # Unload AppArmor profile before deleting the file
+        if command -v apparmor_parser >/dev/null 2>&1 && [ -f /etc/apparmor.d/fiwu ]; then
+            apparmor_parser -R /etc/apparmor.d/fiwu 2>/dev/null || true
+        fi
+
+        # Remove remaining configuration, AppArmor, and persistent state files
+        rm -rf /etc/fiwu
+        rm -rf /var/backups/fiwu
+        rm -f /etc/sudoers.d/fiwu-toggle
+        rm -f /etc/apparmor.d/fiwu
+        rm -rf /usr/share/fiwu
+
+        if [ -d /run/systemd/system ]; then
+            systemctl daemon-reload 2>/dev/null || true
+        fi
+        ;;
+
+    upgrade|failed-upgrade|abort-install|abort-upgrade)
+        ;;
+
+    *)
+        echo "postrm called with unknown argument \`$1'" >&2
+        exit 1
+        ;;
+esac
+
+#DEBHELPER#
+
+exit 0

@@ -1,0 +1,33 @@
+#!/bin/sh
+set -e
+
+BACKUP_DIR="/var/backups/fiwu"
+
+case "$1" in
+    remove|deconfigure)
+        # Create a backup of the configuration files
+        if [ -d /etc/fiwu ]; then
+            mkdir -p "$BACKUP_DIR"
+            cp -r /etc/fiwu "$BACKUP_DIR" 2>/dev/null || true
+            echo "Backup created at $BACKUP_DIR"
+        fi
+
+        # Stop and disable the service
+        if [ -d /run/systemd/system ]; then
+            systemctl stop fiwu.service 2>/dev/null || true
+            systemctl disable fiwu.service 2>/dev/null || true
+        fi
+        ;;
+
+    upgrade|failed-upgrade)
+        ;;
+
+    *)
+        echo "prerm called with unknown argument \`$1'" >&2
+        exit 1
+        ;;
+esac
+
+#DEBHELPER#
+
+exit 0
