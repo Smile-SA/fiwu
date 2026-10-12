@@ -1,0 +1,20 @@
+#!/bin/sh
+set -e
+
+case "$1" in
+    install|upgrade)
+        # Clean up legacy manual install files to prevent PATH and config collisions
+        rm -f /usr/local/bin/fiwu /usr/local/bin/fiwu-daemon
+        rm -rf /opt/fiwu
+        ;;
+    abort-upgrade)
+        ;;
+    *)
+        echo "preinst called with unknown argument \`$1'" >&2
+        exit 1
+        ;;
+esac
+
+#DEBHELPER#
+
+exit 0
