@@ -333,7 +333,7 @@ release:github:
 sync:github:prs:
   stage: import-github-pr
   tags:
-    - gitlab-org-docker
+    - galaxy-dind-shared
   image: debian:12
   variables:
     GIT_DEPTH: 0
