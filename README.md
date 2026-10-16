@@ -1,6 +1,6 @@
 # Fiwu - Interactive Local Firewall
 
-Fiwu is an user-interactive firewall that intercepts packets using an NFQUEUE and maps them to local processes. When a packet is associated with an unknown process within config file, Fiwu prompts the user (via Zenity or tkinter) to allow or block the traffic to that specific process. User decisions are persisted using a simple JSON configuration file, enabling automatic enforcement on subsequent connections.
+Fiwu is an user-interactive firewall that intercepts packets using an NFQUEUE and maps them to local processes. When a packet is associated with an unknown process/IP couple within the config file, Fiwu prompts the user (via Zenity or Tkinter) to allow or block the traffic to that specific process. User decisions are persisted using a simple JSON configuration file, enabling automatic enforcement on subsequent connections.
 
 ## Table of Contents
 
@@ -41,6 +41,11 @@ sudo ./install.sh
 *   **tkinter**: Support for tkinter mode is limited to Wayland-native desktop sessions.
 *   **AppArmor**: The bundled AppArmor profile applies to Debian/Ubuntu installs. Fedora builds skip it, since Fedora relies on SELinux rather than AppArmor by default.
 
+## Usage
+Fiwu firewall rules can be set in various ways:
+- through the popin: a popin will open for each new connection. Users can click "Yes" or "No" to accept or refuse the connection permanently, resulting in a custom rule creation. Checking the "Only once" checkbox will make the rule non permanent. Checking "Apply to all IPs" will apply the allow or block decision permanently for any new IPs for the current process.
+- through the Gnome extension: the Gnome extension enables to select the popin rendering engine (Zenity or Tkinter), define the default behavior (non-permanent block or allowed), and configure the firewall behavior for each known processes (allowed, custom, or blocked). In the custom case, an allow or block slider is made available at an IP level.
+- through the JSON file: a JSON file can be edited in /etc/fiwu/config.json.
 
 ## Service Management
 Fiwu could be managed via the GNOME extension or via the CLI wrapper `fiwu`. Gnome extension is only available on Wayland sessions and provides a quick-access desktop interface to monitor and configure Fiwu directly from the system tray.
