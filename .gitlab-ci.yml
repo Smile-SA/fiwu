@@ -20,7 +20,8 @@ variables:
   KEEP_BUILD_ARTIFACTS: "1"
 
 default:
-  # Retry infrastructure failures
+  tags:
+    - galaxy-dind-shared
   retry:
     max: 2
     when:
@@ -107,8 +108,6 @@ debian:
   extends: .debian_job
   stage: build
   image: debian:12
-  tags:
-    - gitlab-org-docker
   before_script:
     - mkdir -p dist
   script:
@@ -125,8 +124,6 @@ fedora:
   extends: .fedora_job
   stage: build
   image: fedora:43
-  tags:
-    - gitlab-org-docker
   before_script:
     - mkdir -p dist
   script:
@@ -145,8 +142,6 @@ ubuntu:gnome_extension:
   extends: .ubuntu_job
   stage: test-service-management
   image: $OS_TAG
-  tags:
-    - gitlab-org-docker
   needs:
     - job: debian
       artifacts: true
@@ -164,8 +159,6 @@ debian:gnome_extension:
   extends: .debian_job
   stage: test-service-management
   image: $OS_TAG
-  tags:
-    - gitlab-org-docker
   needs:
     - job: debian
       artifacts: true
@@ -183,8 +176,6 @@ fedora:gnome_extension:
   extends: .fedora_job
   stage: test-service-management
   image: $OS_TAG
-  tags:
-    - gitlab-org-docker
   needs:
     - job: fedora
       artifacts: true
@@ -203,8 +194,6 @@ ubuntu:configuration:
   extends: .ubuntu_job
   stage: test-configuration
   image: $OS_TAG
-  tags:
-    - gitlab-org-docker
   allow_failure: false
   needs:
     - job: debian
@@ -228,8 +217,6 @@ debian:configuration:
   extends: .debian_job
   stage: test-configuration
   image: $OS_TAG
-  tags:
-    - gitlab-org-docker
   allow_failure: false
   needs:
     - job: debian
@@ -253,8 +240,6 @@ fedora:configuration:
   extends: .fedora_job
   stage: test-configuration
   image: $OS_TAG
-  tags:
-    - gitlab-org-docker
   allow_failure: false
   needs:
     - job: fedora
@@ -288,8 +273,6 @@ release:github:
     - job: ubuntu:configuration
     - job: debian:configuration
     - job: fedora:configuration
-  tags:
-    - gitlab-org-docker
   image: debian:12
   script:
     - apt-get update -qq && apt-get install -y -qq curl ca-certificates
@@ -325,15 +308,13 @@ release:github:
   rules:
     - if: '$CI_PIPELINE_SOURCE == "trigger"'
       when: never
-    - if: '$CI_PIPELINE_SOURCE == "schedule" && $CI_COMMIT_BRANCH == "dev"'
+    - if: '$CI_PIPELINE_SOURCE == "schedule"'
       when: on_success
     - if: '$CI_COMMIT_BRANCH == "dev"'
       when: manual
 
 sync:github:prs:
   stage: import-github-pr
-  tags:
-    - galaxy-dind-shared
   image: debian:12
   variables:
     GIT_DEPTH: 0
