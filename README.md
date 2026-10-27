@@ -6,7 +6,8 @@ Fiwu is an user-interactive firewall that intercepts packets using an NFQUEUE an
 
 - [Installation](#installation)
   - [Install from the PPA](#install-from-the-ppa)
-  - [Install from source](#install-from-source)
+  - [Install from Releases](#install-from-releases)
+  - [Build and Install from Source](#build-and-install-from-source)
 - [Usage](#usage)
 - [Service Management](#service-management)
   - [Using GNOME Extension](#using-gnome-extension)
@@ -26,9 +27,20 @@ sudo apt update
 sudo apt install fiwu
 ```
 
-### Install from source
+### Install from Releases
+Fiwu can be downloaded from [GitHub-Releases](https://github.com/Smile-SA/fiwu/releases) and installed using respective package managers:
+
+#### Debian/Ubuntu:
 ```
-git clone [repository]
+sudo apt install ./fiwu_*.deb  
+```
+#### Fedora:
+```
+sudo dnf install ./fiwu-*.rpm 
+```
+### Build and install from source
+```
+git clone https://github.com/Smile-SA/fiwu.git
 cd fiwu
 sudo ./install.sh
 ```
@@ -36,17 +48,15 @@ sudo ./install.sh
 `install.sh` picks the right path automatically:
 - **Debian/Ubuntu**: builds a `.deb` via `dpkg-buildpackage` and installs it with `apt`.
 - **Fedora**: builds an `.rpm` via `rpmbuild` (`fedora/build.sh`) and installs it with `dnf`.
-
-
 *   **Extension**: Fiwu's GNOME extension requires a re-login to activate.
 *   **tkinter**: Support for tkinter mode is limited to Wayland-native desktop sessions.
 *   **AppArmor**: The bundled AppArmor profile applies to Debian/Ubuntu installs. Fedora builds skip it, since Fedora relies on SELinux rather than AppArmor by default.
 
 ## Usage
 Fiwu firewall rules can be set in various ways:
-- through the popin: a popin will open for each new connection. Users can click "Yes" or "No" to accept or block the connection permanently, resulting in a custom rule creation. Checking the "Only once" checkbox will make the rule non permanent. Checking "Apply to all IPs" will apply the allow or block decision permanently for any new IPfor the current process.
-- through the Gnome extension: the Gnome extension enables to select the popin rendering engine (Zenity or Tkinter), define the default behavior (non-permanent block or allowed), and configure the firewall behavior for each known processes (allowed, custom, or blocked). In the custom case, an allow or block slider is made available at an IP level. 
-- through the JSON file: a JSON file can be edited in /etc/fiwu/config.json.
+- **Through the popin:** a popin will open for each new connection. Users can click "Yes" or "No" to accept or block the connection permanently, resulting in a custom rule creation. Checking the "Only once" checkbox will make the rule non permanent. Checking "Apply to all IPs" will apply the allow or block decision permanently for any new IPfor the current process.
+- **Through the Gnome extension:** the Gnome extension enables to select the popin rendering engine (Zenity or Tkinter), define the default behavior (non-permanent block or allowed), and configure the firewall behavior for each known processes (allowed, custom, or blocked). In the custom case, an allow or block slider is made available at an IP level. 
+- **Through the JSON file:** a JSON file can be edited in /etc/fiwu/config.json.
 
 
 ## Service Management
