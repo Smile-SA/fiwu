@@ -1,9 +1,8 @@
 stages:
-  # Jobs in later stages wait for the preceding stage unless an explicit 
-  # needs relationship applies.
+  # Jobs in later stages wait for the preceding stage unless an explicit needs relationship applies.
   - build
+  - test-configuration-resource
   - test-service-management
-  - test-configuration
   - import-github-pr
   - deploy
 
@@ -28,9 +27,35 @@ default:
       - runner_system_failure
       - stuck_or_timeout_failure
 
+.randomized_config:
+  # Generates random configuration to test against protocols.
+  randomized_config: &randomized_config
+    - |
+      chmod +x ./tests/random_config.sh
+      ./tests/random_config.sh > ./tests/test_config.json
+
+.resource_measurement:
+ # Exports resource usage of the fiwu during tests. Uses pidstat to measure CPU, RAM, and disk I/O.
+  start_monitor: &start_resource_monitor
+    - |
+      command -v pidstat >/dev/null 2>&1 || { apt-get install -y -qq sysstat || dnf install -y -q sysstat; }
+      PID=$(cat /tmp/fiwu.pid 2>/dev/null)
+      pidstat -u -r -d ${PID:+-p $PID} 1 > /tmp/monitor.log 2>&1 &
+      echo $! > /tmp/monitor.pid
+
+  resource_measurement: &resource_measurement
+    - |
+      [ -f /tmp/monitor.pid ] && kill -INT $(cat /tmp/monitor.pid) 2>/dev/null || true
+      sleep 1
+      grep "^Average:" /tmp/monitor.log | awk '
+        /%CPU/  { for(i=1;i<=NF;i++) if($i=="%CPU") c=i; getline; cpu=$c; printf " CPU:    %s%% of 1 core\n", cpu }
+        / RSS/  { for(i=1;i<=NF;i++) if($i=="RSS") r=i;  getline; ram=$r/1024; printf " RAM:    %.1f MB\n", ram }
+        /kB_rd/ { for(i=1;i<=NF;i++) { if($i=="kB_rd/s") rd=i; if($i=="kB_wr/s") wr=i; } getline; r=$rd; w=$wr; printf " READ:   %s kB/s\n WRITE:  %s kB/s\n", r, w }
+        END     { printf "{\"cpu\":%s, \"ram\":%.1f, \"read\":%s, \"write\":%s}\n", cpu, ram, r, w > "resource_metrics.json" }
+      ' || echo "No data captured."
+
 .fedora_job:
-  # Hidden templates apply platform selection without duplicating rules in
-  # every Fedora job. The final rule prevents accidental inclusion otherwise.
+  # Fedora jobs run only in Fedora or full pipeline mode.
   rules:
     - if: '$CI_PIPELINE_SOURCE == "trigger"'
       when: never
@@ -50,6 +75,7 @@ default:
     - when: never
 
 .debian_job:
+  # Debian jobs run only in Debian or full pipeline mode.
   rules:
     - if: '$CI_PIPELINE_SOURCE == "trigger"'
       when: never
@@ -59,8 +85,7 @@ default:
     - when: never
     
 .tests_dependencies:
-  # YAML anchor shared by protocol tests. It installs only the tools needed by
-  # the network probes and handles both Debian and Fedora Distros.
+  # Installs only the tools needed by the network probes and handles both Debian and Fedora Distros.
   install_test_dependencies: &install_test_dependencies
   - |
     # Ubuntu / Debian
@@ -78,28 +103,30 @@ default:
       done
       
       apt-get install -y -qq $APT_OPTS --no-install-recommends \
-              jq nmap dnsutils netcat-openbsd iputils-ping openssl curl sudo >/dev/null 2>&1 || \
-      { sleep 2 && apt-get install -y -qq $APT_OPTS --no-install-recommends jq nmap dnsutils netcat-openbsd iputils-ping openssl curl sudo >/dev/null 2>&1; }
+              jq nmap dnsutils netcat-openbsd iputils-ping openssl curl sudo sysstat >/dev/null 2>&1 || \
+      { sleep 2 && apt-get install -y -qq $APT_OPTS --no-install-recommends jq nmap dnsutils netcat-openbsd iputils-ping openssl curl sudo sysstat >/dev/null 2>&1; }
 
     # Fedora
     elif command -v dnf >/dev/null 2>&1; then
-      dnf install -y -q jq nmap bind-utils netcat iputils openssl curl sudo
+      dnf install -y -q jq nmap bind-utils netcat iputils openssl curl sudo sysstat
     fi
 
 .start_fiwu:
+  # Starts the fiwu daemon in the background and captures its PID for resource monitoring.
   start: &start_fiwu
-  - |
-    command -v pgrep >/dev/null 2>&1 || { apt-get install -y -qq procps || dnf install -y -q procps-ng; }
-    UNIT=$(ls /usr/lib/systemd/system/fiwu.service /lib/systemd/system/fiwu.service 2>/dev/null | head -1)
-    [ -n "$UNIT" ] || { echo "fiwu.service unit not found in package" >&2; exit 1; }
-    EXEC=$(grep -m1 '^ExecStart=' "$UNIT" | sed -E 's/^ExecStart=[-@+!:]*//')
-    echo "Starting daemon: $EXEC"
-    nohup sh -c "exec $EXEC" >/tmp/fiwu.log 2>&1 &
-    FIWU_PID=$!
-    sleep 3
-    echo "--- fiwu log (tail) ---"; tail -n 20 /tmp/fiwu.log
-    BIN=$(basename "${EXEC%% *}")
-    kill -0 "$FIWU_PID" 2>/dev/null || pgrep -x "$BIN" >/dev/null || { echo "fiwu daemon is not running" >&2; exit 1; }
+    - |
+      command -v pgrep >/dev/null 2>&1 || { apt-get install -y -qq procps || dnf install -y -q procps-ng; }
+      UNIT=$(ls /usr/lib/systemd/system/fiwu.service /lib/systemd/system/fiwu.service 2>/dev/null | head -1)
+      [ -n "$UNIT" ] || { echo "fiwu.service unit not found in package" >&2; exit 1; }
+      EXEC=$(grep -m1 '^ExecStart=' "$UNIT" | sed -E 's/^ExecStart=[-@+!:]*//')
+      echo "Starting daemon: $EXEC"
+      nohup sh -c "exec $EXEC" >/tmp/fiwu.log 2>&1 &
+      FIWU_PID=$!
+      echo "$FIWU_PID" > /tmp/fiwu.pid  # <-- Added this line to persist PID
+      sleep 3
+      echo "--- fiwu log (tail) ---"; tail -n 20 /tmp/fiwu.log
+      BIN=$(basename "${EXEC%% *}")
+      kill -0 "$FIWU_PID" 2>/dev/null || pgrep -x "$BIN" >/dev/null || { echo "fiwu daemon is not running" >&2; exit 1; }
 
 # Build one package per OS_TAG. Build jobs publish only the package format that
 # their downstream tests install; dist/ itself remains an ephemeral workspace.
@@ -136,8 +163,7 @@ fedora:
     matrix:
       - OS_TAG: fedora43
 
-# Test Extension verify installation of gnome extension, contents and permissions independently of
-# the runtime protocol tests, while still using the matching platform build.
+# Test Extension verify installation of gnome extension, contents and permissions.
 ubuntu:gnome_extension:
   extends: .ubuntu_job
   stage: test-service-management
@@ -189,12 +215,16 @@ fedora:gnome_extension:
     matrix:
       - OS_TAG: ["fedora:43"]
 
-# Configuration
+# Configuration-tests
 ubuntu:configuration:
   extends: .ubuntu_job
-  stage: test-configuration
+  stage: test-configuration-resource
   image: $OS_TAG
   allow_failure: false
+  artifacts:
+    paths:
+      - resource_metrics.json
+    when: always
   needs:
     - job: debian
       artifacts: true
@@ -202,22 +232,29 @@ ubuntu:configuration:
     - test -n "$(ls dist/*.deb 2>/dev/null)" || (echo "Missing .deb package in dist/" >&2; exit 1)
     - apt-get update -qq && apt-get install -y ./dist/fiwu_*.deb
     - *install_test_dependencies
+    - *randomized_config
     - chmod +x ./tests/test_configuration.sh
     - fiwu -g dev || true
     - *start_fiwu
+    - *start_resource_monitor
   script:
     - ./tests/test_configuration.sh
+    - *resource_measurement
   after_script:
-    - sort /tmp/fiwu.log | uniq -c | sort -rn | head -15 || true
+    - sort /tmp/fiwu.log | uniq -c | sort -rn | head -7 || true
   parallel:
     matrix:
       - OS_TAG: ["ubuntu:22.04", "ubuntu:24.04", "ubuntu:26.04"]
 
 debian:configuration:
   extends: .debian_job
-  stage: test-configuration
+  stage: test-configuration-resource
   image: $OS_TAG
   allow_failure: false
+  artifacts:
+    paths:
+      - resource_metrics.json
+    when: always
   needs:
     - job: debian
       artifacts: true
@@ -225,22 +262,29 @@ debian:configuration:
     - test -n "$(ls dist/*.deb 2>/dev/null)" || (echo "Missing .deb package in dist/" >&2; exit 1)
     - apt-get update -qq && apt-get install -y ./dist/fiwu_*.deb
     - *install_test_dependencies
+    - *randomized_config
     - chmod +x ./tests/test_configuration.sh
     - fiwu -g dev || true
     - *start_fiwu
+    - *start_resource_monitor
   script:
-    - ./tests/test_configuration.sh 
+    - ./tests/test_configuration.sh
+    - *resource_measurement
   after_script:
-    - sort /tmp/fiwu.log | uniq -c | sort -rn | head -15 || true
+    - sort /tmp/fiwu.log | uniq -c | sort -rn | head -7 || true
   parallel:
     matrix:
       - OS_TAG: ["debian:12", "debian:13"]
 
 fedora:configuration:
   extends: .fedora_job
-  stage: test-configuration
+  stage: test-configuration-resource
   image: $OS_TAG
   allow_failure: false
+  artifacts:
+    paths:
+      - resource_metrics.json
+    when: always
   needs:
     - job: fedora
       artifacts: true
@@ -248,13 +292,16 @@ fedora:configuration:
     - test -n "$(ls dist/*.rpm 2>/dev/null)" || (echo "Missing .rpm for ${OS_TAG}" >&2; exit 1)
     - dnf install -y ./dist/*.rpm
     - *install_test_dependencies
+    - *randomized_config
     - chmod +x ./tests/test_configuration.sh
     - fiwu -g dev || true
     - *start_fiwu
+    - *start_resource_monitor
   script:
     - ./tests/test_configuration.sh
+    - *resource_measurement
   after_script:
-    - sort /tmp/fiwu.log | uniq -c | sort -rn | head -15 || true
+    - sort /tmp/fiwu.log | uniq -c | sort -rn | head -7 || true
   parallel:
     matrix:
       - OS_TAG: ["fedora:43"]
@@ -313,6 +360,7 @@ release:github:
     - if: '$CI_COMMIT_BRANCH == "dev"'
       when: manual
 
+# Sync GitHub PRs as GitLab Merge Requests
 sync:github:prs:
   stage: import-github-pr
   image: debian:12

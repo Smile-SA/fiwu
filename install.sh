@@ -150,6 +150,7 @@ else
         
         mkdir -p dist
         mv ../fiwu_*.deb dist/ 2>/dev/null || true
+        ART_DIR="dist"
     fi
 
     # Find the newly built or existing package
