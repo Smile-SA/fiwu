@@ -1,15 +1,39 @@
 stages:
   # Jobs in later stages wait for the preceding stage unless an explicit needs relationship applies.
   - build
-  - test-configuration-resource
+  - test-configuration
   - test-service-management
+  - benchmark
   - import-github-pr
   - deploy
 
 variables:
-  # Set to "fedora", "debian", or "ubuntu" for a single-platform pipeline;
-  # "all" enables every platform job.
-  RUN_PLATFORM: "all"
+  # Build Platform Toggle
+  RUN_PLATFORM: 
+    value: "all"
+    options: ["all", "fedora", "ubuntu", "debian"]
+    description: "Select specific OS or all"
+    
+  # Test Stage Toggles
+  RUN_CONFIG:
+    value: "true"
+    options: ["true", "false"]
+    description: "Run test-configuration stage?"
+  RUN_SERVICE_MGMT:
+    value: "true"
+    options: ["true", "false"]
+    description: "Run test-service-management stage?"
+
+  # Benchmark Stage Toggles
+  RUN_BENCHMARK:
+    value: "true"
+    options: ["true", "false"]
+    description: "Run benchmark stage?"
+  BENCHMARK_RATE:
+    value: "10000"
+    description: "Target Requests Per Second (RPS) limit for wrk load generator"
+
+  BENCH_SKIP_QUEUE_CHECK: "1"
   DEBIAN_FRONTEND: "noninteractive"
   NEEDRESTART_MODE: "a"
   IS_UBUNTU: "false"
@@ -27,6 +51,52 @@ default:
       - runner_system_failure
       - stuck_or_timeout_failure
 
+.shared_rules:
+  skip_stages: &skip_stages
+    if: >
+      $CI_PIPELINE_SOURCE == "trigger" ||
+      (($CI_COMMIT_BRANCH != "dev" || $CI_PIPELINE_SOURCE != "push") && (
+        ($RUN_CONFIG == "false" && $CI_JOB_STAGE == "test-configuration") ||
+        ($RUN_SERVICE_MGMT == "false" && $CI_JOB_STAGE == "test-service-management") ||
+        ($RUN_BENCHMARK == "false" && $CI_JOB_STAGE == "benchmark")))
+    when: never
+    
+  pause_pr: &pause_pr
+    if: '$CI_COMMIT_BRANCH =~ /^gh-pr-/'
+    when: manual
+
+  manual_off_dev: &manual_off_dev
+    if: '$CI_COMMIT_BRANCH != "dev" && $CI_PIPELINE_SOURCE != "schedule"'
+    when: manual
+    allow_failure: true
+
+.fedora_job:
+  rules:
+    - *skip_stages
+    - *pause_pr
+    - if: '$RUN_PLATFORM != "all" && $RUN_PLATFORM != "fedora"'
+      when: never
+    - *manual_off_dev
+    - when: on_success
+
+.ubuntu_job:
+  rules:
+    - *skip_stages
+    - *pause_pr
+    - if: '$RUN_PLATFORM != "all" && $RUN_PLATFORM != "ubuntu"'
+      when: never
+    - *manual_off_dev
+    - when: on_success
+
+.debian_job:
+  rules:
+    - *skip_stages
+    - *pause_pr
+    - if: '$RUN_PLATFORM != "all" && $RUN_PLATFORM != "debian" && $RUN_PLATFORM != "ubuntu"'
+      when: never
+    - *manual_off_dev
+    - when: on_success
+
 .randomized_config:
   # Generates random configuration to test against protocols.
   randomized_config: &randomized_config
@@ -34,56 +104,6 @@ default:
       chmod +x ./tests/random_config.sh
       ./tests/random_config.sh > ./tests/test_config.json
 
-.resource_measurement:
- # Exports resource usage of the fiwu during tests. Uses pidstat to measure CPU, RAM, and disk I/O.
-  start_monitor: &start_resource_monitor
-    - |
-      command -v pidstat >/dev/null 2>&1 || { apt-get install -y -qq sysstat || dnf install -y -q sysstat; }
-      PID=$(cat /tmp/fiwu.pid 2>/dev/null)
-      pidstat -u -r -d ${PID:+-p $PID} 1 > /tmp/monitor.log 2>&1 &
-      echo $! > /tmp/monitor.pid
-
-  resource_measurement: &resource_measurement
-    - |
-      [ -f /tmp/monitor.pid ] && kill -INT $(cat /tmp/monitor.pid) 2>/dev/null || true
-      sleep 1
-      grep "^Average:" /tmp/monitor.log | awk '
-        /%CPU/  { for(i=1;i<=NF;i++) if($i=="%CPU") c=i; getline; cpu=$c; printf " CPU:    %s%% of 1 core\n", cpu }
-        / RSS/  { for(i=1;i<=NF;i++) if($i=="RSS") r=i;  getline; ram=$r/1024; printf " RAM:    %.1f MB\n", ram }
-        /kB_rd/ { for(i=1;i<=NF;i++) { if($i=="kB_rd/s") rd=i; if($i=="kB_wr/s") wr=i; } getline; r=$rd; w=$wr; printf " READ:   %s kB/s\n WRITE:  %s kB/s\n", r, w }
-        END     { printf "{\"cpu\":%s, \"ram\":%.1f, \"read\":%s, \"write\":%s}\n", cpu, ram, r, w > "resource_metrics.json" }
-      ' || echo "No data captured."
-
-.fedora_job:
-  # Fedora jobs run only in Fedora or full pipeline mode.
-  rules:
-    - if: '$CI_PIPELINE_SOURCE == "trigger"'
-      when: never
-    - if: '$CI_COMMIT_BRANCH =~ /^gh-pr-/'
-      when: manual
-    - if: '$RUN_PLATFORM == "all" || $RUN_PLATFORM == "fedora"'
-    - when: never
-
-.ubuntu_job:
-  # Ubuntu jobs run only in Ubuntu or full pipeline mode.
-  rules:
-    - if: '$CI_PIPELINE_SOURCE == "trigger"'
-      when: never
-    - if: '$CI_COMMIT_BRANCH =~ /^gh-pr-/'
-      when: manual
-    - if: '$RUN_PLATFORM == "all" || $RUN_PLATFORM == "ubuntu"'
-    - when: never
-
-.debian_job:
-  # Debian jobs run only in Debian or full pipeline mode.
-  rules:
-    - if: '$CI_PIPELINE_SOURCE == "trigger"'
-      when: never
-    - if: '$CI_COMMIT_BRANCH =~ /^gh-pr-/'
-      when: manual
-    - if: '$RUN_PLATFORM == "all" || $RUN_PLATFORM == "debian"'
-    - when: never
-    
 .tests_dependencies:
   # Installs only the tools needed by the network probes and handles both Debian and Fedora Distros.
   install_test_dependencies: &install_test_dependencies
@@ -103,16 +123,16 @@ default:
       done
       
       apt-get install -y -qq $APT_OPTS --no-install-recommends \
-              jq nmap dnsutils netcat-openbsd iputils-ping openssl curl sudo sysstat >/dev/null 2>&1 || \
-      { sleep 2 && apt-get install -y -qq $APT_OPTS --no-install-recommends jq nmap dnsutils netcat-openbsd iputils-ping openssl curl sudo sysstat >/dev/null 2>&1; }
+              jq nmap dnsutils netcat-openbsd iputils-ping openssl curl sudo >/dev/null 2>&1 || \
+      { sleep 2 && apt-get install -y -qq $APT_OPTS --no-install-recommends jq nmap dnsutils netcat-openbsd iputils-ping openssl curl sudo >/dev/null 2>&1; }
 
     # Fedora
     elif command -v dnf >/dev/null 2>&1; then
-      dnf install -y -q jq nmap bind-utils netcat iputils openssl curl sudo sysstat
+      dnf install -y -q jq nmap bind-utils netcat iputils openssl curl sudo
     fi
 
 .start_fiwu:
-  # Starts the fiwu daemon in the background and captures its PID for resource monitoring.
+  # Starts the fiwu daemon in the background.
   start: &start_fiwu
     - |
       command -v pgrep >/dev/null 2>&1 || { apt-get install -y -qq procps || dnf install -y -q procps-ng; }
@@ -122,7 +142,6 @@ default:
       echo "Starting daemon: $EXEC"
       nohup sh -c "exec $EXEC" >/tmp/fiwu.log 2>&1 &
       FIWU_PID=$!
-      echo "$FIWU_PID" > /tmp/fiwu.pid  # <-- Added this line to persist PID
       sleep 3
       echo "--- fiwu log (tail) ---"; tail -n 20 /tmp/fiwu.log
       BIN=$(basename "${EXEC%% *}")
@@ -132,8 +151,13 @@ default:
 # their downstream tests install; dist/ itself remains an ephemeral workspace.
 # Build baseline packages (forward-compatible across target OS releases)
 debian:
-  extends: .debian_job
   stage: build
+  rules:
+    - *skip_stages
+    - *pause_pr
+    - if: '$RUN_PLATFORM == "all" || $RUN_PLATFORM == "debian" || $RUN_PLATFORM == "ubuntu"'
+      when: on_success
+    - when: never
   image: debian:12
   before_script:
     - mkdir -p dist
@@ -148,8 +172,13 @@ debian:
       - OS_TAG: debian12
 
 fedora:
-  extends: .fedora_job
   stage: build
+  rules:
+    - *skip_stages
+    - *pause_pr
+    - if: '$RUN_PLATFORM == "all" || $RUN_PLATFORM == "fedora"'
+      when: on_success
+    - when: never
   image: fedora:43
   before_script:
     - mkdir -p dist
@@ -218,13 +247,8 @@ fedora:gnome_extension:
 # Configuration-tests
 ubuntu:configuration:
   extends: .ubuntu_job
-  stage: test-configuration-resource
+  stage: test-configuration
   image: $OS_TAG
-  allow_failure: false
-  artifacts:
-    paths:
-      - resource_metrics.json
-    when: always
   needs:
     - job: debian
       artifacts: true
@@ -236,10 +260,8 @@ ubuntu:configuration:
     - chmod +x ./tests/test_configuration.sh
     - fiwu -g dev || true
     - *start_fiwu
-    - *start_resource_monitor
   script:
     - ./tests/test_configuration.sh
-    - *resource_measurement
   after_script:
     - sort /tmp/fiwu.log | uniq -c | sort -rn | head -7 || true
   parallel:
@@ -248,13 +270,8 @@ ubuntu:configuration:
 
 debian:configuration:
   extends: .debian_job
-  stage: test-configuration-resource
+  stage: test-configuration
   image: $OS_TAG
-  allow_failure: false
-  artifacts:
-    paths:
-      - resource_metrics.json
-    when: always
   needs:
     - job: debian
       artifacts: true
@@ -266,10 +283,8 @@ debian:configuration:
     - chmod +x ./tests/test_configuration.sh
     - fiwu -g dev || true
     - *start_fiwu
-    - *start_resource_monitor
   script:
     - ./tests/test_configuration.sh
-    - *resource_measurement
   after_script:
     - sort /tmp/fiwu.log | uniq -c | sort -rn | head -7 || true
   parallel:
@@ -278,13 +293,8 @@ debian:configuration:
 
 fedora:configuration:
   extends: .fedora_job
-  stage: test-configuration-resource
+  stage: test-configuration
   image: $OS_TAG
-  allow_failure: false
-  artifacts:
-    paths:
-      - resource_metrics.json
-    when: always
   needs:
     - job: fedora
       artifacts: true
@@ -296,20 +306,131 @@ fedora:configuration:
     - chmod +x ./tests/test_configuration.sh
     - fiwu -g dev || true
     - *start_fiwu
-    - *start_resource_monitor
   script:
     - ./tests/test_configuration.sh
-    - *resource_measurement
   after_script:
     - sort /tmp/fiwu.log | uniq -c | sort -rn | head -7 || true
   parallel:
     matrix:
       - OS_TAG: ["fedora:43"]
 
+# Benchmark tests run in isolated hardware to avoid interference from other jobs.
+ubuntu:benchmark:
+  extends: .ubuntu_job
+  stage: benchmark
+  tags:
+    - $OS_TAG
+  resource_group: benchmark_hardware_lock
+  needs:
+    - job: debian
+      artifacts: true
+  before_script:
+    - apt-get update -qq && apt-get install -y ./dist/fiwu_*.deb iperf3 jq curl iproute2 nginx wrk
+    - chmod +x ./tests/benchmark.sh
+  script:
+    - ./tests/benchmark.sh
+  artifacts:
+    paths:
+      - benchmark_results_*.json
+    when: always
+    expire_in: 1 week
+  parallel:
+    matrix:
+      - OS_TAG: ["lxc:ubuntu22.04", "lxc:ubuntu24.04", "lxc:ubuntu26.04"]
+
+debian:benchmark:
+  stage: benchmark
+  tags:
+    - $OS_TAG
+  resource_group: benchmark_hardware_lock
+  needs:
+    - job: debian
+      artifacts: true
+  before_script:
+    - apt-get update -qq && apt-get install -y ./dist/fiwu_*.deb iperf3 jq curl iproute2 nginx wrk
+    - chmod +x ./tests/benchmark.sh
+  script:
+    - ./tests/benchmark.sh
+  artifacts:
+    paths:
+      - benchmark_results_*.json
+    when: always
+    expire_in: 1 week
+  rules:
+    - *skip_stages
+    - *pause_pr
+    - if: '$RUN_PLATFORM != "all" && $RUN_PLATFORM != "debian"'
+      when: never
+    - *manual_off_dev
+    - when: on_success
+  parallel:
+    matrix:
+      - OS_TAG: ["lxc:debian12", "lxc:debian13"]
+
+fedora:benchmark:
+  extends: .fedora_job
+  stage: benchmark
+  tags:
+    - $OS_TAG
+  resource_group: benchmark_hardware_lock
+  needs:
+    - job: fedora
+      artifacts: true
+  before_script:
+    - dnf install -y ./dist/*.rpm iperf3 jq curl iproute nginx make gcc openssl-devel git perl-core
+    - rm -rf /tmp/wrk-src && git clone --depth 1 https://github.com/wg/wrk.git /tmp/wrk-src && make -C /tmp/wrk-src -j1 && install -m 0755 /tmp/wrk-src/wrk /usr/local/bin/wrk && rm -rf /tmp/wrk-src
+    - chmod +x ./tests/benchmark.sh
+  script:
+    - ./tests/benchmark.sh
+  artifacts:
+    paths:
+      - benchmark_results_*.json
+    when: always
+    expire_in: 1 week
+  parallel:
+    matrix:
+      - OS_TAG: ["lxc:fedora43"]
+
+bundle:benchmark:
+  stage: benchmark
+  image: python:3-alpine
+  needs:
+    - job: ubuntu:benchmark
+      optional: true
+      artifacts: true
+    - job: debian:benchmark
+      optional: true
+      artifacts: true
+    - job: fedora:benchmark
+      optional: true
+      artifacts: true
+  rules:
+    - *skip_stages
+    - *pause_pr
+    - when: on_success
+  script:
+    - |
+      python3 -c '
+      import glob, json
+      out = {}
+      for p in sorted(glob.glob("benchmark_results_*.json")):
+          try:
+              out.update(json.load(open(p)))
+          except Exception:
+              pass
+      json.dump(out, open("benchmark_summary.json", "w"), indent=2)
+      '
+  artifacts:
+    paths:
+      - benchmark_summary.json
+    when: always
+    expire_in: 30 days
+
 # Uploads the tested .deb/.rpm to GitLab Package Registry and pushes to GitHub Releases.
 release:github:
   stage: deploy
   needs:
+    - job: sync:main
     - job: debian
       artifacts: true
     - job: fedora
@@ -349,11 +470,13 @@ release:github:
       fi
     - |
       gh release create "v${PKG_VERSION}" dist/*.deb dist/*.rpm \
-        --repo "$GITHUB_REPO_PATH" --target "$CI_COMMIT_SHA" \
-        --title "Release v${PKG_VERSION}" --notes "Automated release from GitLab CI (${CI_COMMIT_SHORT_SHA})" \
+        --repo "$GITHUB_REPO_PATH" --target main \
+        --title "Release v${PKG_VERSION}" \
       || gh release upload "v${PKG_VERSION}" dist/*.deb dist/*.rpm --repo "$GITHUB_REPO_PATH" --clobber
   rules:
     - if: '$CI_PIPELINE_SOURCE == "trigger"'
+      when: never
+    - if: '$RUN_PLATFORM != "all" || $RUN_CONFIG != "true" || $RUN_SERVICE_MGMT != "true"'
       when: never
     - if: '$CI_PIPELINE_SOURCE == "schedule"'
       when: on_success
@@ -366,9 +489,14 @@ sync:github:prs:
   image: debian:12
   variables:
     GIT_DEPTH: 0
+    BOT_NAME: "FIWU CI Bot"
+    BOT_EMAIL: "fiwu-ci-bot@noreply.${CI_SERVER_HOST}"
   script:
     - apt-get update -qq && apt-get install -y -qq git curl jq
+    - git config user.name "$BOT_NAME"
+    - git config user.email "$BOT_EMAIL"
     - git remote set-url origin "https://gitlab-ci-token:${CI_JOB_TOKEN}@${CI_SERVER_HOST}/${CI_PROJECT_PATH}.git"
+    - git fetch origin dev main
     - |
       curl -fsS -H "Authorization: Bearer ${GITHUB_TOKEN}" \
         "https://api.github.com/repos/${GITHUB_REPO_PATH}/pulls?state=open&per_page=100" \
@@ -378,9 +506,43 @@ sync:github:prs:
         branch="gh-pr-${pr_num}"
         git fetch "https://github.com/${GITHUB_REPO_PATH}.git" "+refs/pull/${pr_num}/head:refs/heads/${branch}"
         git push -f origin "$branch" \
+          -o ci.skip \
           -o merge_request.create \
           -o merge_request.target=dev \
           -o "merge_request.title=GitHub PR #${pr_num}"
       done < open_prs.txt
   rules:
+    - if: '$CI_PIPELINE_SOURCE == "trigger" && $ENABLE_PR_SYNC == "true"'
+  
+# Sync main branch: filtered copy of dev without .gitlab-ci.yml (fast-forward only)
+sync:main:
+  stage: deploy
+  image: debian:12
+  variables:
+    GIT_STRATEGY: none
+  script:
+    - apt-get update -qq && apt-get install -y -qq git git-filter-repo
+    - |
+      set -eu
+      git clone -q --single-branch --branch dev \
+        "https://oauth2:${MAIN_PUSH_TOKEN}@${CI_SERVER_HOST}/${CI_PROJECT_PATH}.git" /tmp/fiwu-filtered
+      cd /tmp/fiwu-filtered
+      git filter-repo --quiet --invert-paths --path .gitlab-ci.yml
+      git remote add origin "https://oauth2:${MAIN_PUSH_TOKEN}@${CI_SERVER_HOST}/${CI_PROJECT_PATH}.git"
+      if [ -n "$(git log --all --oneline -- .gitlab-ci.yml)" ]; then
+        echo "CI file still in filtered history, not pushing" >&2; exit 1
+      fi
+      git fetch -q origin main
+      if ! git merge-base --is-ancestor origin/main HEAD; then
+        echo "main has diverged from filtered dev, not pushing" >&2; exit 1
+      fi
+      git push origin HEAD:main
+  rules:
     - if: '$CI_PIPELINE_SOURCE == "trigger"'
+      when: never
+    - if: '$CI_COMMIT_BRANCH != "dev"'
+      when: never
+    - if: '$CI_PIPELINE_SOURCE == "schedule"'
+      when: on_success
+    - when: manual
+      allow_failure: true
