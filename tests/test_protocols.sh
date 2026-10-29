@@ -316,10 +316,11 @@ _tcp $GW             5672 "AMQP/5672 → gateway"
 _tcp $GW            15672 "RabbitMQ-mgmt/15672 → gateway"
 _tcp $GW             9092 "Kafka/9092 → gateway"
 # WebSocket upgrades over HTTP — use curl to verify the Upgrade header survives
+WS_KEY="${WS_KEY:-$(openssl rand -base64 16 2>/dev/null || head -c16 /dev/urandom | base64)}"
 chk curl "WebSocket upgrade → echo.websocket.org" \
     bash -c "$CURL_BIN -sf --max-time $TO_C \
         -H 'Upgrade: websocket' -H 'Connection: Upgrade' \
-        -H 'Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==' \
+        -H 'Sec-WebSocket-Key: $WS_KEY' \
         -H 'Sec-WebSocket-Version: 13' \
         -o /dev/null -w '%{http_code}' \
         http://echo.websocket.org 2>/dev/null | grep -qE '^(101|200|301|302)'"
