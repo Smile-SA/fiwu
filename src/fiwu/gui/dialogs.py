@@ -1,7 +1,6 @@
 import os
 import sys
 import pwd
-import psutil
 import subprocess
 import tkinter as tk
 
@@ -22,12 +21,38 @@ _proc_info_cache = {"ts": 0.0, "items": None}
 
 
 def _gui_process_infos(gui_processes):
-    """Cached stand-in for psutil.process_iter([...]) limited to GUI processes"""
+    """Cached stand-in for process iteration limited to GUI processes (Native)"""
     now = time.monotonic()
     if _proc_info_cache["items"] is None or now - _proc_info_cache["ts"] > _PROC_INFO_TTL:
-        items = [SimpleNamespace(info=p.info)
-                 for p in psutil.process_iter(['username', 'name', 'environ'])
-                 if p.info['name'] in gui_processes]
+        items = []
+        for pid_dir in os.listdir('/proc'):
+            if not pid_dir.isdigit():
+                continue
+            try:
+                # 1. Get process name
+                with open(f"/proc/{pid_dir}/comm", "r") as f:
+                    name = f.read().strip()
+                
+                if name not in gui_processes:
+                    continue
+                    
+                # 2. Get username via file owner UID
+                uid = os.stat(f"/proc/{pid_dir}").st_uid
+                username = pwd.getpwuid(uid).pw_name
+                
+                # 3. Get environment variables (null-byte separated)
+                env = {}
+                with open(f"/proc/{pid_dir}/environ", "r") as f:
+                    for item in f.read().split('\0'):
+                        if '=' in item:
+                            k, v = item.split('=', 1)
+                            env[k] = v
+                            
+                items.append(SimpleNamespace(info={'name': name, 'username': username, 'environ': env}))
+            except (OSError, KeyError):
+                # KeyError happens if UID isn't in pwd database
+                continue
+                
         if items:
             _proc_info_cache.update(ts=now, items=items)
         return items
@@ -477,17 +502,14 @@ def ask_user_gui(
     
     # Search for a running GUI process to extract environment variables
     for proc in _gui_process_infos(gui_processes):
-        try:
-            if proc.info['name'] in gui_processes:
-                user = user or proc.info['username']
-                if proc.info['environ']:
-                    env = proc.info['environ']
-                    display = env.get('DISPLAY', display)
-                    wayland_display = env.get('WAYLAND_DISPLAY', wayland_display)
-                    dbus_address = env.get('DBUS_SESSION_BUS_ADDRESS', dbus_address)
-                break
-        except (psutil.NoSuchProcess, psutil.AccessDenied):
-            continue
+        if proc.info['name'] in gui_processes:
+            user = user or proc.info['username']
+            if proc.info['environ']:
+                env = proc.info['environ']
+                display = env.get('DISPLAY', display)
+                wayland_display = env.get('WAYLAND_DISPLAY', wayland_display)
+                dbus_address = env.get('DBUS_SESSION_BUS_ADDRESS', dbus_address)
+            break
 
     user = user or "root"
 

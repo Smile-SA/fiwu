@@ -1,5 +1,4 @@
 import logging
-import os
 from pathlib import Path
 
 # Directory for log files
@@ -40,6 +39,18 @@ def setup_logger() -> logging.Logger:
     console_fmt = logging.Formatter('%(levelname)s - %(message)s')
     ch.setFormatter(console_fmt)
     logger.addHandler(ch)
+
+    # Move formatting and I/O off the caller's thread (the packet callback)
+    import atexit
+    from logging.handlers import QueueHandler, QueueListener
+    from queue import SimpleQueue
+    q = SimpleQueue()
+    listener = QueueListener(q, *logger.handlers, respect_handler_level=True)
+    for h in list(logger.handlers):
+        logger.removeHandler(h)
+    logger.addHandler(QueueHandler(q))
+    listener.start()
+    atexit.register(listener.stop)
 
     return logger
 

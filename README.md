@@ -112,7 +112,7 @@ options:
 - **Thread synchronization**: Fiwu uses dedicated thread-safe locks to prevent race conditions between the asynchronous popup threads, the `ss` port-mapping scans, and the memory cleaning processes.
 - **Decision flow** (`dialogs.py`):
   - If a process is unknown, a dialog prompts the user to Allow or Block the traffic.
-  - **One-Time Action (tkinter only)**: Includes a session-scoped checkbox to allow temporary authorization or blocking handled purely in memory. A background thread running every 2 seconds uses `psutil` to track running processes and automatically purges the decision as soon as the application closes, without mutating the persistent `config.json`.
+  - **One-Time Action (tkinter only)**: Includes a session-scoped checkbox to allow temporary authorization or blocking handled purely in memory. A background thread running every 2 seconds uses `proc` to track running processes and automatically purges the decision as soon as the application closes, without mutating the persistent `config.json`.
   - **Zenity mode**: Acts strictly as a permanent prompt due to native Zenity toolkit layout limitations (no checkbox support).
 - **Action**:
   - If blocked (permanently or temporarily), Fiwu immediately terminates active connections for that process using `ss -K` and drops the traffic.

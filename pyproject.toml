@@ -18,8 +18,7 @@ requires-python = ">=3.8"
 
 # Runtime dependencies required for Fiwu to operate.
 dependencies = [
-    "scapy",      # For packet sniffing and manipulation
-    "psutil"      # For process information and system monitoring
+    "pyroute2" # For native netlink kernel socket queries
 ]
 
 # Entry points for console commands installed by pip.

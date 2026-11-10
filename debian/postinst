@@ -63,7 +63,7 @@ case "$1" in
         # Reset any rate-limit or failed locks before systemd starts/enables the service
         if [ -d /run/systemd/system ]; then
             systemctl daemon-reload || true
-            systemctl reset-failed fiwu || true
+            systemctl reset-failed fiwu 2>/dev/null || true
         fi
 
         # Final Messages

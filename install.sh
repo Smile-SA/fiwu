@@ -100,7 +100,7 @@ if [ "${IS_FEDORA}" = true ]; then
 
     if [ -z "$WHEEL_FILE" ]; then
         if [ "$BUILD_LOCAL" = true ]; then
-            run_step "Installing build dependencies" dnf install -y python3 python3-scapy python3-psutil iptables gcc python3-devel make redhat-rpm-config libnetfilter_queue-devel rpm-build python3-wheel python3-setuptools python3-pip python3-Cython python3-build systemd-rpm-macros|| true
+            run_step "Installing build dependencies" dnf install -y python3 iptables gcc python3-devel make redhat-rpm-config libnetfilter_queue-devel rpm-build python3-wheel python3-setuptools python3-pip python3-Cython python3-build python3-pyroute2 systemd-rpm-macros|| true
             run_step "Creating source sdist" python3 -m build --sdist -o dist || true
 
             if [ -n "$ART_DIR" ]; then
@@ -121,8 +121,8 @@ if [ "${IS_FEDORA}" = true ]; then
     fi
 
     if [ -n "$WHEEL_FILE" ]; then
-        run_step "Installing runtime dependencies" dnf install -y python3 python3-scapy python3-psutil iptables gcc python3-devel libnetfilter_queue-devel || true
-        run_step "Installing NetfilterQueue via PIP" python3 -m pip install --no-deps NetfilterQueue || true
+        run_step "Installing runtime dependencies" dnf install -y python3 iptables gcc python3-devel libnetfilter_queue-devel || true
+        run_step "Installing PIP dependencies" python3 -m pip install --no-deps NetfilterQueue pyroute2 || true
         run_step "Installing pre-built wheel" python3 -m pip install --no-deps --upgrade "$WHEEL_FILE" || true
     fi
 

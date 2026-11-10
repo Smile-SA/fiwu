@@ -2,7 +2,7 @@ Source: fiwu
 Section: python
 Priority: optional
 Maintainer: Smile R&D <rnd@smile.fr>
-Build-Depends: cython3 (>= 0.29.30),
+Build-Depends: cython3 (>= 0.29.28),
                debhelper-compat (= 13),
                dh-python,
                libnetfilter-queue-dev,
@@ -33,8 +33,7 @@ Depends: apparmor,
          libnetfilter-queue1,
          python3 (>= 3.10),
          python3-dev,
-         python3-psutil,
-         python3-scapy,
+         python3-pyroute2,
          python3-setuptools,
          python3-tk,
          ${misc:Depends},

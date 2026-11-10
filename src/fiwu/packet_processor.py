@@ -1,6 +1,7 @@
+import socket
+import struct
 import threading
 import subprocess
-from scapy.all import IP, TCP, UDP, ICMP
 
 from fiwu.logger_config import logger
 from fiwu.state_store import StateStore
@@ -160,29 +161,36 @@ class PacketProcessor:
         """
         current_config = self.state_store.get_config()
 
-        # Parse Scapy packet layers
-        scapy_packet = IP(packet.get_payload())
-        if not scapy_packet.haslayer(IP):
+        # Parse IPv4 header directly (fixed offsets, no Scapy)
+        payload = packet.get_payload()
+        if len(payload) < 20 or payload[0] >> 4 != 4:
             packet.accept()
             return
 
-        dst_ip = scapy_packet[IP].dst
+        ihl = (payload[0] & 0x0F) * 4
+        proto_num = payload[9]
+        dst_ip = socket.inet_ntoa(payload[16:20])
         protocol = "OTHER"
-        port, local_port = None, None
+        port, local_port, icmp_type = None, None, None
 
-        # Extract protocol details
-        if scapy_packet.haslayer(TCP):
-            protocol, port, local_port = "TCP", scapy_packet[TCP].dport, scapy_packet[TCP].sport
-        elif scapy_packet.haslayer(UDP):
-            protocol, port, local_port = "UDP", scapy_packet[UDP].dport, scapy_packet[UDP].sport
-        elif scapy_packet.haslayer(ICMP):
-            protocol = "ICMP"
+        # L4 header is only present in the first fragment
+        if (struct.unpack_from("!H", payload, 6)[0] & 0x1FFF) == 0 and len(payload) >= ihl + 4:
+            if proto_num == 6:
+                protocol = "TCP"
+                local_port, port = struct.unpack_from("!HH", payload, ihl)
+            elif proto_num == 17:
+                protocol = "UDP"
+                local_port, port = struct.unpack_from("!HH", payload, ihl)
+            elif proto_num == 1:
+                protocol = "ICMP"
+                icmp_type = payload[ihl]
 
         # Identify the process/service by local port
         service_name = "Unknown"
         if protocol in ["TCP", "UDP"]:
-            service_name = self.state_store.get_service_for_port(local_port)
-        elif protocol == "ICMP" and scapy_packet[ICMP].type == 8:
+            flow = (socket.inet_ntoa(payload[12:16]), dst_ip, port) if protocol == "TCP" else None
+            service_name = self.state_store.get_service_for_port(local_port, flow)
+        elif protocol == "ICMP" and icmp_type == 8:
             service_name = "ping"
 
         # Allow traffic for internal system processes
