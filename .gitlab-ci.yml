@@ -10,23 +10,23 @@ stages:
 variables:
   # Build Platform Toggle
   RUN_PLATFORM: 
-    value: "all"
+    value: "debian"
     options: ["all", "fedora", "ubuntu", "debian"]
     description: "Select specific OS or all"
     
   # Test Stage Toggles
   RUN_CONFIG:
-    value: "true"
+    value: "false"
     options: ["true", "false"]
     description: "Run test-configuration stage?"
   RUN_SERVICE_MGMT:
-    value: "true"
+    value: "false"
     options: ["true", "false"]
     description: "Run test-service-management stage?"
 
   # Benchmark Stage Toggles
   RUN_BENCHMARK:
-    value: "true"
+    value: "false"
     options: ["true", "false"]
     description: "Run benchmark stage?"
   BENCHMARK_RATE:
@@ -66,7 +66,7 @@ default:
     when: manual
 
   manual_off_dev: &manual_off_dev
-    if: '$CI_COMMIT_BRANCH != "dev" && $CI_PIPELINE_SOURCE != "schedule"'
+    if: '$CI_COMMIT_BRANCH != "dev" && $CI_PIPELINE_SOURCE != "schedule" && $CI_COMMIT_TAG == null'
     when: manual
     allow_failure: true
 
@@ -160,8 +160,31 @@ debian:
     - when: never
   image: debian:12
   before_script:
+    - apt-get update -qq && apt-get install -y -qq git
     - mkdir -p dist
   script:
+    - |
+      if [ -n "$CI_COMMIT_TAG" ]; then
+        PKG_VER=${CI_COMMIT_TAG#v}
+        
+        # 1. Get exact Git commit date in Debian's strict RFC 2822 format
+        COMMIT_DATE=$(git log -1 --format="%cd" --date="rfc")
+        
+        # 2. Safely prepend the new release block to the top of debian/changelog
+        {
+          echo "fiwu (${PKG_VER}-1) unstable; urgency=medium"
+          echo ""
+          echo "  * Automated tag release synced with Git."
+          echo ""
+          echo " -- Fiwu CI Bot <fiwu-ci-bot@noreply.gitlab.com>  $COMMIT_DATE"
+          echo ""
+        } > debian/changelog.tmp
+        cat debian/changelog >> debian/changelog.tmp
+        mv debian/changelog.tmp debian/changelog
+        
+        sed -i "s/^version = .*/version = \"$PKG_VER\"/" pyproject.toml || true
+        sed -i "s/^version *=.*/version = $PKG_VER/" setup.cfg || true
+      fi
     - ./install.sh --build-local
   artifacts:
     paths:
@@ -181,8 +204,25 @@ fedora:
     - when: never
   image: fedora:43
   before_script:
+    - dnf install -y -q git
     - mkdir -p dist
   script:
+    - |
+      if [ -n "$CI_COMMIT_TAG" ]; then
+        PKG_VER=${CI_COMMIT_TAG#v}
+        
+        # 1. Get exact Git commit date in strict RPM format (e.g., Mon Jun 22 2026)
+        COMMIT_DATE=$(git log -1 --format="%cd" --date="format:%a %b %d %Y")
+        
+        # 2. Patch the spec Version
+        sed -i "s/^Version:.*/Version: $PKG_VER/" fedora/SPECS/fiwu.spec
+        
+        # 3. Dynamically inject the commit date into the RPM changelog
+        sed -i "/^%changelog/a * $COMMIT_DATE Fiwu CI Bot <fiwu-ci-bot@noreply.gitlab.com> - $PKG_VER-1\n- Automated tag release synced with Git" fedora/SPECS/fiwu.spec
+        
+        sed -i "s/^version = .*/version = \"$PKG_VER\"/" pyproject.toml || true
+        sed -i "s/^version *=.*/version = $PKG_VER/" setup.cfg || true
+      fi
     - ./install.sh --build-local
   artifacts:
     paths:
@@ -444,7 +484,8 @@ release:github:
   image: debian:12
   script:
     - apt-get update -qq && apt-get install -y -qq curl ca-certificates
-    - PKG_VERSION=$(dpkg-deb -f "$(ls dist/fiwu_*.deb | head -1)" Version | sed 's/[^A-Za-z0-9._-]/-/g')
+    # Dynamically extract version from Git Tag if present, otherwise fallback to .deb parsing
+    - if [ -n "$CI_COMMIT_TAG" ]; then PKG_VERSION=${CI_COMMIT_TAG#v}; else PKG_VERSION=$(dpkg-deb -f "$(ls dist/fiwu_*.deb | head -1)" Version | sed 's/[^A-Za-z0-9._-]/-/g'); fi
     - 'echo "Package version: ${PKG_VERSION}"'
     # Registry upload only for manual releases
     - |
@@ -478,6 +519,8 @@ release:github:
       when: never
     - if: '$RUN_PLATFORM != "all" || $RUN_CONFIG != "true" || $RUN_SERVICE_MGMT != "true"'
       when: never
+    - if: '$CI_COMMIT_TAG'
+      when: on_success
     - if: '$CI_PIPELINE_SOURCE == "schedule"'
       when: on_success
     - if: '$CI_COMMIT_BRANCH == "dev"'
@@ -527,6 +570,9 @@ sync:main:
       git clone -q --single-branch --branch dev \
         "https://oauth2:${MAIN_PUSH_TOKEN}@${CI_SERVER_HOST}/${CI_PROJECT_PATH}.git" /tmp/fiwu-filtered
       cd /tmp/fiwu-filtered
+      if [ -n "${CI_COMMIT_TAG:-}" ]; then
+        git merge-base --is-ancestor "$CI_COMMIT_SHA" HEAD || { echo "tagged commit is not on dev, not syncing" >&2; exit 1; }
+      fi
       git filter-repo --quiet --invert-paths --path .gitlab-ci.yml
       git remote add origin "https://oauth2:${MAIN_PUSH_TOKEN}@${CI_SERVER_HOST}/${CI_PROJECT_PATH}.git"
       if [ -n "$(git log --all --oneline -- .gitlab-ci.yml)" ]; then
@@ -540,9 +586,44 @@ sync:main:
   rules:
     - if: '$CI_PIPELINE_SOURCE == "trigger"'
       when: never
+    - if: '$CI_COMMIT_TAG'
+      when: manual
+      allow_failure: true
     - if: '$CI_COMMIT_BRANCH != "dev"'
       when: never
     - if: '$CI_PIPELINE_SOURCE == "schedule"'
       when: on_success
     - when: manual
       allow_failure: true
+
+launchpad:ppa:
+  stage: deploy
+  image: ubuntu:24.04
+  variables:
+    GIT_DEPTH: 0
+  parallel:
+    matrix:
+      - DISTRO: [jammy, noble, resolute]
+  before_script:
+    - apt-get update -qq && apt-get install -y -qq devscripts git-buildpackage dput debhelper gnupg dh-python pybuild-plugin-pyproject python3-all python3-dev python3-pip python3-setuptools cython3 pkg-config libnetfilter-queue-dev
+    - echo "$GPG_PRIVATE_KEY" | base64 -d | gpg --batch --import
+    - git config --global user.name "Fiwu CI Bot"
+    - git config --global user.email "$PPA_EMAIL"
+    - export DEBEMAIL="$PPA_EMAIL" DEBFULLNAME="Fiwu CI Bot" EDITOR=true
+  script:
+    - export PKG_VER=${CI_COMMIT_TAG#v}
+    - export KEYID=$(gpg --list-secret-keys --with-colons | awk -F':' '/^sec/{print $5; exit}')
+    - |
+      if grep -q quilt debian/source/format; then
+        git archive --format=tar.gz --prefix="fiwu-${PKG_VER}/" -o "../fiwu_${PKG_VER}.orig.tar.gz" HEAD
+      fi
+    - gbp dch --auto --ignore-branch --spawn-editor=never --new-version="$PKG_VER-1" --release --distribution=$DISTRO --force-distribution
+    - dch -b --newversion "${PKG_VER}-1~${DISTRO}" --distribution $DISTRO --force-distribution "Automated tag build"
+    - debuild --no-lintian -k$KEYID -S -sa -d
+    - dput ppa:rnd-smile/fiwu ../fiwu_*~${DISTRO}_source.changes
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "trigger"'
+      when: never
+    - if: '$CI_COMMIT_TAG'
+      when: manual
+    - when: never

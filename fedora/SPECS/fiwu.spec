@@ -30,8 +30,7 @@ BuildRequires:  pkgconfig(libnetfilter_queue)
 BuildRequires:  systemd-rpm-macros
 
 Requires:       python3
-Requires:       python3-scapy
-Requires:       python3-psutil
+Requires:       python3-pyroute2
 Requires:       python3-tkinter
 Requires:       iproute
 Requires:       iptables
@@ -123,5 +122,3 @@ cp -r src/fiwu/gui/extension/. %{buildroot}%{_datadir}/gnome-shell/extensions/fi
 # the fiwu-apparmor-profile install step above.
 
 %changelog
-* Mon 22 06 2026 Saifuddin Mohammad <saifuddin.mohammad@smile.fr> - 0.7.6.4
-- Initial RPM packaging, translated from debian/control + debian/rules
