@@ -164,7 +164,7 @@ echo "Baseline Throughput: $(mbps "$THROUGHPUT_BASE") Mbps"
 
 echo "--- PHASE B: Active (Fiwu RUNNING) ---"
 stop_fiwu
-fiwu -g dev >/dev/null 2>&1 &
+fiwu -g dev >/tmp/fiwu_run.log 2>&1 &
 for _ in $(seq 1 20); do   # wait up to 10s for the daemon to attach NFQUEUE
     grep -q . "$QUEUE_FILE" 2>/dev/null && break
     sleep 0.5

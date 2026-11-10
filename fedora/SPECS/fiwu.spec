@@ -30,8 +30,7 @@ BuildRequires:  pkgconfig(libnetfilter_queue)
 BuildRequires:  systemd-rpm-macros
 
 Requires:       python3
-Requires:       python3-scapy
-Requires:       python3-psutil
+Requires:       python3-pyroute2
 Requires:       python3-tkinter
 Requires:       iproute
 Requires:       iptables
