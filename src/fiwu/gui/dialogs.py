@@ -7,6 +7,142 @@ import tkinter as tk
 
 from fiwu.logger_config import logger
 
+import atexit
+import collections
+import json
+import threading
+import time
+from types import SimpleNamespace
+
+# Runs as the desktop user and forks one fresh process per popup 
+# bypassing the per-popup python startup + imports + systemd-run + process scan.
+POPUP_SCRIPT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "popup_window.py")
+_PROC_INFO_TTL = 3600.0
+_proc_info_cache = {"ts": 0.0, "items": None}
+
+
+def _gui_process_infos(gui_processes):
+    """Cached stand-in for psutil.process_iter([...]) limited to GUI processes"""
+    now = time.monotonic()
+    if _proc_info_cache["items"] is None or now - _proc_info_cache["ts"] > _PROC_INFO_TTL:
+        items = [SimpleNamespace(info=p.info)
+                 for p in psutil.process_iter(['username', 'name', 'environ'])
+                 if p.info['name'] in gui_processes]
+        if items:
+            _proc_info_cache.update(ts=now, items=items)
+        return items
+    return _proc_info_cache["items"]
+
+
+class _PopupDaemon:
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._proc = None
+        self._key = None
+        self._seq = 0
+
+    @staticmethod
+    def _spawn(s):
+        cmd = [
+            "runuser", "-u", s["user"], "--", "env",
+            f"DISPLAY={s['display']}",
+            f"WAYLAND_DISPLAY={s['wayland_display']}",
+            f"XDG_RUNTIME_DIR={s['xdg_runtime_dir']}",
+            f"DBUS_SESSION_BUS_ADDRESS={s['dbus_address']}",
+            "systemd-run", "--pipe", "--user",
+            "--setenv=GDK_BACKEND=x11",
+            "--setenv=TK_USE_INPUT_METHODS=0",
+            sys.executable, POPUP_SCRIPT,
+        ]
+        proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                stderr=subprocess.PIPE, text=True, bufsize=1)
+        errs = collections.deque(maxlen=20)
+        proc.errs = errs
+        threading.Thread(target=lambda: [errs.append(l.rstrip()) for l in proc.stderr],
+                         daemon=True).start()
+        watchdog = threading.Timer(15.0, proc.kill)
+        watchdog.start()
+        try:
+            for line in proc.stdout:
+                if line.strip() == "READY":
+                    return proc
+        finally:
+            watchdog.cancel()
+        proc.kill()
+        time.sleep(0.2)
+        logger.error(f"[TK] popup daemon failed to start (exit={proc.poll()}): "
+                     f"{' | '.join(errs) or 'no stderr output'}")
+        return None
+
+    def _ensure(self, s):
+        key = tuple(sorted(s.items()))
+        if self._proc is not None and self._proc.poll() is None and key == self._key:
+            return True
+        self._stop_locked()
+        proc = self._spawn(s)
+        if proc is None:
+            return False
+        self._proc, self._key = proc, key
+        return True
+
+    def _stop_locked(self):
+        proc, self._proc = self._proc, None
+        if proc is None:
+            return
+        try:
+            proc.stdin.close()
+        except Exception:
+            pass
+        try:
+            proc.wait(timeout=1)
+        except Exception:
+            proc.kill()
+
+    def stop(self):
+        with self._lock:
+            self._stop_locked()
+
+    def warm(self, s):
+        with self._lock:
+            self._ensure(s)
+
+    def ask(self, s, service_name, dst_ip, port):
+        """Return 0-5, or None if the daemon is unusable (caller falls back)."""
+        with self._lock:
+            for _ in range(2):
+                if not self._ensure(s):
+                    return None
+                self._seq += 1
+                try:
+                    self._proc.stdin.write(json.dumps(
+                        {"id": self._seq, "service": service_name, "ip": dst_ip, "port": port}) + "\n")
+                    self._proc.stdin.flush()
+                    for line in self._proc.stdout:
+                        try:
+                            msg = json.loads(line)
+                        except ValueError:
+                            continue
+                        if msg.get("id") == self._seq:
+                            return int(msg["code"])
+                except (BrokenPipeError, OSError, ValueError) as e:
+                    logger.debug(f"[TK] popup daemon error: {e}")
+                errs = getattr(self._proc, "errs", None)
+                logger.error(f"[TK] popup daemon died while serving a popup: "
+                             f"{' | '.join(errs) if errs else 'no stderr output'}")
+                self._stop_locked()
+            return None
+
+
+_popup_daemon = _PopupDaemon()
+atexit.register(_popup_daemon.stop)
+
+
+def prewarm_popup(force_tk: bool = False, gui_engine_pref: str = "tkinter") -> None:
+    """Call once at fiwu startup so even the first popup is instant."""
+    threading.Thread(
+        target=lambda: ask_user_gui("", "", None, force_tk=force_tk,
+                                    gui_engine_pref=gui_engine_pref, prewarm_only=True),
+        daemon=True).start()
 
 def ask_user_zenity(
     service_name: str, 
@@ -65,7 +201,8 @@ def ask_user_tkinter(
     display: str | None = None,
     wayland_display: str | None = None,
     xdg_runtime_dir: str | None = None,
-    dbus_address: str | None = None
+    dbus_address: str | None = None,
+    on_answer=None
 ) -> int:
     """Launch a Tkinter dialog to ask the user for permission.
     
@@ -77,6 +214,15 @@ def ask_user_tkinter(
         or 4 (Error/Fallback).
     """
     if user is not None:
+        #Fast path: pre-warmed popup daemon
+        code = _popup_daemon.ask(
+            {"user": user, "display": display, "wayland_display": wayland_display,
+             "xdg_runtime_dir": xdg_runtime_dir, "dbus_address": dbus_address},
+            service_name, dst_ip, port)
+        if code is not None and 0 <= code <= 5:
+            return code
+        logger.warning("[TK] popup daemon unavailable, using one-shot fallback")
+
         # Spawn as user to ensure proper X11/Wayland integration
         module_dir = os.path.dirname(os.path.abspath(__file__))
         
@@ -223,15 +369,21 @@ def ask_user_tkinter(
     cb_once["widget"].pack(side="left", padx=(0, 28))
     cb_all["widget"].pack(side="left")
 
+    def finish():
+        root.withdraw()
+        if on_answer:
+            on_answer(result['code'])
+        root.destroy()
+
     def choose_yes():
         # 2 = Allow once, 4 = Allow all
         result['code'] = 2 if cb_once["is_checked"]() else (4 if cb_all["is_checked"]() else 0)
-        root.destroy()
+        finish()
 
     def choose_no():
         # 3 = Block once, 5 = Block all
         result['code'] = 3 if cb_once["is_checked"]() else (5 if cb_all["is_checked"]() else 1)
-        root.destroy()
+        finish()
 
     def make_button(parent, text, command):
         canvas = tk.Canvas(parent, width=1, height=int(40 * scale), bg=CSS["bg"], highlightthickness=0, bd=0, cursor="hand2", takefocus=True)
@@ -289,6 +441,7 @@ def ask_user_tkinter(
     btn_yes.pack(side="left", expand=True, fill="x", padx=(8, 0))
 
     root.bind("<Escape>", lambda e: choose_no())
+    root.protocol("WM_DELETE_WINDOW", finish)
 
     root.update_idletasks()
     width = CSS["window_width"]
@@ -306,7 +459,8 @@ def ask_user_gui(
     port: int | None,
     force_zenity: bool = False, 
     force_tk: bool = False, 
-    gui_engine_pref: str = "tkinter"
+    gui_engine_pref: str = "tkinter",
+    prewarm_only: bool = False
 ) -> int:
     """Determine GUI backend and launch the appropriate user prompt.
     
@@ -322,7 +476,7 @@ def ask_user_gui(
     gui_processes = ['gnome-shell', 'Xorg', 'wayland', 'kwin_wayland', 'xfce4-session', 'lxsession', 'mate-session']
     
     # Search for a running GUI process to extract environment variables
-    for proc in psutil.process_iter(['username', 'name', 'environ']):
+    for proc in _gui_process_infos(gui_processes):
         try:
             if proc.info['name'] in gui_processes:
                 user = user or proc.info['username']
@@ -350,6 +504,13 @@ def ask_user_gui(
             gui_engine = "tkinter"
         else:
             gui_engine = gui_engine_pref
+
+        # startup hook
+        if prewarm_only:  
+            if gui_engine != "zenity":
+                _popup_daemon.warm({"user": user, "display": display, "wayland_display": wayland_display,
+                                    "xdg_runtime_dir": xdg_runtime_dir, "dbus_address": dbus_address})
+            return 0
 
         if gui_engine == "zenity":
             return ask_user_zenity(service_name, dst_ip, port, user, display, wayland_display, xdg_runtime_dir, dbus_address)

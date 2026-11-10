@@ -12,6 +12,7 @@ from netfilterqueue import NetfilterQueue
 from fiwu.logger_config import logger
 from fiwu.state_store import StateStore
 from fiwu.packet_processor import PacketProcessor
+from fiwu.gui.dialogs import prewarm_popup
 
 SYSTEM_CONFIG = Path("/etc/fiwu/config.json")
 DEV_CONFIG = Path(__file__).parent / "config.json"
@@ -130,6 +131,10 @@ def main() -> None:
         force_zenity=force_zenity,
         force_tk=force_tk
     )
+
+
+    if not (dev_mode or force_zenity) and state_store.get_config().get("gui", "tkinter").lower() != "zenity":
+        prewarm_popup()
 
     # Start background threads
     threading.Thread(target=refresh_port_map_worker, args=(state_store,), daemon=True).start()
